@@ -17,7 +17,19 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)
+
+# FIXED CORS - Allow your Netlify frontend
+CORS(app, resources={
+    r"/api/*": {
+        "origins": [
+            "https://vermillion-kheer-9eeb5f.netlify.app",
+            "http://localhost:3000",
+            "http://127.0.0.1:3000"
+        ],
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"]
+    }
+})
 
 # Global state
 trading_bot = None
