@@ -1,0 +1,30 @@
+# Core Dependencies
+smartapi-python==1.3.0
+pyotp==2.9.0
+pandas==2.1.0
+numpy==1.24.3
+
+# Technical Analysis
+TA-Lib==0.4.28
+
+# Visualization
+matplotlib==3.7.2
+plotly==5.17.0
+
+# Notifications
+requests==2.31.0
+
+# Database
+sqlite3  # Built-in with Python
+
+# Additional utilities
+python-dateutil==2.8.2
+pytz==2023.3
+
+# Optional: For advanced features
+schedule==1.2.0
+websocket-client==1.6.1
+
+# For production deployment
+gunicorn==21.2.0  # If running as web service
+python-dotenv==1.0.0  # For environment variables

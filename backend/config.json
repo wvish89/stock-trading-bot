@@ -1,0 +1,45 @@
+{
+    "_comment": "ANGEL BROKING API CREDENTIALS",
+    "api_key": "YOUR_API_KEY_HERE",
+    "client_id": "YOUR_CLIENT_ID_HERE",
+    "password": "YOUR_PASSWORD_HERE",
+    "totp_secret": "YOUR_TOTP_SECRET_HERE",
+    
+    "_comment_trading": "TRADING PARAMETERS",
+    "max_positions": 5,
+    "risk_per_trade": 0.02,
+    "max_daily_loss": 0.05,
+    "capital": 100000,
+    
+    "_comment_indicators": "TECHNICAL INDICATOR SETTINGS",
+    "rsi_period": 14,
+    "rsi_overbought": 70,
+    "rsi_oversold": 30,
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_signal": 9,
+    
+    "_comment_notifications": "NOTIFICATION SETTINGS (Optional)",
+    "telegram_bot_token": "",
+    "telegram_chat_id": "",
+    "email_from": "",
+    "email_password": "",
+    "email_to": "",
+    
+    "_comment_watchlist": "STOCKS TO MONITOR AND TRADE",
+    "watchlist": [
+        "RELIANCE-EQ",
+        "TCS-EQ",
+        "INFY-EQ",
+        "HDFCBANK-EQ",
+        "ICICIBANK-EQ",
+        "SBIN-EQ",
+        "ITC-EQ",
+        "WIPRO-EQ",
+        "TATAMOTORS-EQ",
+        "BHARTIARTL-EQ"
+    ],
+    
+    "_comment_timing": "AUTO SQUARE-OFF TIME (HH:MM format, 24-hour)",
+    "square_off_time": "15:15"
+}
