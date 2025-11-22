@@ -16,7 +16,10 @@ from dataclasses import dataclass
 from enum import Enum
 
 # API Integration
-from SmartApi import SmartConnect
+try:
+    from SmartApi import SmartConnect
+except ImportError:
+    from smartapi import SmartConnect
 import pyotp
 
 # Notifications
