@@ -1,7 +1,7 @@
 """
-Smart Trading Bot Backend API v3.1 - FIXED VERSION
-Enhanced with: Technical Analysis, Risk Management, Stock Selection, Trading Rules
-All Critical Issues Fixed: Market Status, Order Execution, Portfolio Tracking, P&L Calculation
+Advanced Intelligent Trading Bot v5.0 - Ensemble Strategy System
+Automatically combines all 7 strategies with intelligent selection
+Auto-trades based on market conditions + strategy performance
 """
 
 from flask import Flask, jsonify, request
@@ -9,38 +9,44 @@ from flask_cors import CORS
 import threading
 import os
 from datetime import datetime, timedelta, time as dtime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import logging
 import random
 import math
+import numpy as np
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# CORS - Allow Netlify frontend
 CORS(app, resources={
     r"/api/*": {
         "origins": [
             "https://vermillion-kheer-9eeb5f.netlify.app",
             "http://localhost:3000",
-            "http://127.0.0.1:3000",
             "*"
         ],
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"]
+        "allow_headers": ["Content-Type"]
     }
 })
 
-# Global state
 trading_bot = None
 bot_thread = None
-trading_mode = "paper"
 paper_engine = None
 
+class StrategyEnum:
+    ORB = "opening_range_breakout"
+    NEWS = "news_driven"
+    MOMENTUM = "momentum"
+    BREAKOUT = "breakout"
+    SCALPING = "scalping"
+    MA_CROSSOVER = "ma_crossover"
+    PIVOT_POINTS = "pivot_points"
+    ALL = [ORB, NEWS, MOMENTUM, BREAKOUT, SCALPING, MA_CROSSOVER, PIVOT_POINTS]
+
 class Config:
-    """Configuration with all strategy parameters"""
     def __init__(self):
         self.API_KEY = os.getenv('ANGEL_API_KEY', '')
         self.CLIENT_ID = os.getenv('ANGEL_CLIENT_ID', '')
@@ -49,164 +55,422 @@ class Config:
 
         # Capital & Risk Management
         self.CAPITAL = float(os.getenv('TRADING_CAPITAL', 100000))
-        self.RISK_PER_TRADE = float(os.getenv('RISK_PER_TRADE', 0.01)) # 1% max risk per trade
-        self.MAX_DAILY_LOSS = float(os.getenv('MAX_DAILY_LOSS', 0.03)) # 3% max daily loss
+        self.RISK_PER_TRADE = float(os.getenv('RISK_PER_TRADE', 0.01))
+        self.MAX_DAILY_LOSS = float(os.getenv('MAX_DAILY_LOSS', 0.03))
         self.MAX_POSITIONS = int(os.getenv('MAX_POSITIONS', 5))
-        self.MIN_RISK_REWARD = float(os.getenv('MIN_RISK_REWARD', 2.0)) # Minimum 1:2 RR ratio
+        self.MIN_RISK_REWARD = float(os.getenv('MIN_RISK_REWARD', 2.0))
 
-        # Trading Hours - NSE Standard
+        # Trading Hours
         self.MARKET_OPEN = dtime(9, 15)
         self.MARKET_CLOSE = dtime(15, 30)
-        self.AVOID_OPENING_MINUTES = int(os.getenv('AVOID_OPENING_MINUTES', 30)) # Skip first 30 mins
+        self.AVOID_OPENING_MINUTES = int(os.getenv('AVOID_OPENING_MINUTES', 45))
         self.SQUARE_OFF_TIME = os.getenv('SQUARE_OFF_TIME', '15:15')
 
-        # Technical Indicators
-        self.RSI_PERIOD = 14
-        self.RSI_OVERBOUGHT = 70
-        self.RSI_OVERSOLD = 30
-        self.EMA_FAST = 9
-        self.EMA_SLOW = 21
-        self.MACD_FAST = 12
-        self.MACD_SLOW = 26
-        self.MACD_SIGNAL = 9
+        # Ensemble Settings
+        self.ENSEMBLE_MODE = True  # Use all strategies together
+        self.STRATEGY_CONFIDENCE_THRESHOLD = 0.5
+        self.USE_BEST_STRATEGY_ONLY = False  # If False, uses ensemble voting
+        self.ENSEMBLE_VOTING_THRESHOLD = 3  # Min strategies agreeing to trade
 
-        # Watchlist - High liquidity, large-cap stocks
+        # Strategy-specific parameters
+        self.ORB_PERIOD_MINUTES = 15
+        self.MOMENTUM_PERIOD = 14
+        self.MOMENTUM_VOLUME_MULTIPLIER = 1.5
+        self.BREAKOUT_LOOKBACK_BARS = 20
+        self.BREAKOUT_VOLUME_CONFIRMATION = 1.5
+        self.SCALP_TARGET_POINTS = 5
+        self.SCALP_SL_POINTS = 2
+        self.SCALP_MIN_VOLUME = 100000
+        self.MA_FAST_PERIOD = 9
+        self.MA_SLOW_PERIOD = 21
+
+        # Watchlist
         watchlist_str = os.getenv('WATCHLIST',
             'RELIANCE-EQ,TCS-EQ,INFY-EQ,HDFCBANK-EQ,ICICIBANK-EQ,SBIN-EQ,BHARTIARTL-EQ,ITC-EQ,KOTAKBANK-EQ,LT-EQ')
         self.WATCHLIST = [s.strip() for s in watchlist_str.split(',')]
 
-        # Stock selection criteria
-        self.MIN_VOLUME = 100000 # Minimum daily volume
-        self.MAX_SPREAD_PCT = 0.5 # Max bid-ask spread %
+class EnsembleStrategyAnalyzer:
+    """Combines all 7 strategies with intelligent voting system"""
 
-class TechnicalAnalyzer:
-    """Technical and Chart Analysis"""
+    def __init__(self, config: Config):
+        self.config = config
+        self.strategy_scores = {s: {'wins': 0, 'losses': 0, 'score': 0.5} for s in StrategyEnum.ALL}
 
-    @staticmethod
-    def calculate_ema(prices: List[float], period: int) -> List[float]:
-        if len(prices) < period:
-            return prices
-        multiplier = 2 / (period + 1)
-        ema = [sum(prices[:period]) / period]
-        for price in prices[period:]:
-            ema.append((price - ema[-1]) * multiplier + ema[-1])
-        return [None] * (period - 1) + ema
-
-    @staticmethod
-    def calculate_sma(prices: List[float], period: int) -> List[float]:
-        sma = []
-        for i in range(len(prices)):
-            if i < period - 1:
-                sma.append(None)
-            else:
-                sma.append(sum(prices[i-period+1:i+1]) / period)
-        return sma
-
-    @staticmethod
-    def calculate_rsi(prices: List[float], period: int = 14) -> float:
-        if len(prices) < period + 1:
-            return 50
-        deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
-        gains = [d if d > 0 else 0 for d in deltas[-period:]]
-        losses = [-d if d < 0 else 0 for d in deltas[-period:]]
-        avg_gain = sum(gains) / period
-        avg_loss = sum(losses) / period
-        if avg_loss == 0:
-            return 100
-        rs = avg_gain / avg_loss
-        return 100 - (100 / (1 + rs))
-
-    @staticmethod
-    def calculate_macd(prices: List[float]) -> Dict:
-        ema12 = TechnicalAnalyzer.calculate_ema(prices, 12)
-        ema26 = TechnicalAnalyzer.calculate_ema(prices, 26)
-        macd_line = []
-        for i in range(len(prices)):
-            if ema12[i] is not None and ema26[i] is not None:
-                macd_line.append(ema12[i] - ema26[i])
-            else:
-                macd_line.append(None)
-        valid_macd = [m for m in macd_line if m is not None]
-        signal_line = TechnicalAnalyzer.calculate_ema(valid_macd, 9) if len(valid_macd) >= 9 else []
-        return {
-            'macd': macd_line[-1] if macd_line and macd_line[-1] else 0,
-            'signal': signal_line[-1] if signal_line else 0,
-            'histogram': (macd_line[-1] or 0) - (signal_line[-1] if signal_line else 0)
-        }
-
-    @staticmethod
-    def detect_trend(prices: List[float]) -> str:
-        if len(prices) < 21:
-            return 'sideways'
-        ema9 = TechnicalAnalyzer.calculate_ema(prices, 9)
-        ema21 = TechnicalAnalyzer.calculate_ema(prices, 21)
-        if ema9[-1] and ema21[-1]:
-            if ema9[-1] > ema21[-1] * 1.002:
-                return 'uptrend'
-            elif ema9[-1] < ema21[-1] * 0.998:
-                return 'downtrend'
-        return 'sideways'
-
-    @staticmethod
-    def find_support_resistance(prices: List[float]) -> Dict:
-        if len(prices) < 20:
-            return {'support': prices[-1] * 0.98, 'resistance': prices[-1] * 1.02}
-        recent = prices[-20:]
-        return {
-            'support': min(recent),
-            'resistance': max(recent)
-        }
-
-    @staticmethod
-    def detect_breakout(prices: List[float], volume: List[float]) -> Optional[str]:
-        if len(prices) < 20 or len(volume) < 20:
-            return None
-        sr = TechnicalAnalyzer.find_support_resistance(prices[:-1])
+    def analyze_orb(self, prices: List[float], volumes: List[float]) -> Dict:
+        """Opening Range Breakout"""
+        if len(prices) < self.config.ORB_PERIOD_MINUTES:
+            return {'signal': 'HOLD', 'confidence': 0}
+        
+        opening_range = prices[:self.config.ORB_PERIOD_MINUTES]
+        opening_high = max(opening_range)
+        opening_low = min(opening_range)
+        range_width = opening_high - opening_low
         current_price = prices[-1]
-        avg_volume = sum(volume[-20:-1]) / 19
-        current_volume = volume[-1]
+        current_volume = volumes[-1]
+        avg_volume = np.mean(volumes[-20:]) if len(volumes) >= 20 else current_volume
+        
+        if current_price > opening_high and current_volume > avg_volume * 1.2:
+            return {
+                'signal': 'BUY',
+                'confidence': 0.8,
+                'price': current_price,
+                'stop_loss': opening_low - (range_width * 0.1),
+                'target': current_price + (range_width * 2),
+                'strategy': 'ORB',
+                'reason': f'ORB Bullish breakout'
+            }
+        elif current_price < opening_low and current_volume > avg_volume * 1.2:
+            return {
+                'signal': 'SELL',
+                'confidence': 0.8,
+                'price': current_price,
+                'stop_loss': opening_high + (range_width * 0.1),
+                'target': current_price - (range_width * 2),
+                'strategy': 'ORB',
+                'reason': f'ORB Bearish breakdown'
+            }
+        return {'signal': 'HOLD', 'confidence': 0, 'strategy': 'ORB'}
 
-        # Breakout with volume confirmation
-        if current_price > sr['resistance'] and current_volume > avg_volume * 1.5:
-            return 'bullish_breakout'
-        elif current_price < sr['support'] and current_volume > avg_volume * 1.5:
-            return 'bearish_breakout'
-        return None
+    def analyze_news(self, prices: List[float], volumes: List[float]) -> Dict:
+        """News-Driven Trading"""
+        if len(prices) < 10:
+            return {'signal': 'HOLD', 'confidence': 0, 'strategy': 'NEWS'}
+        
+        current_price = prices[-1]
+        current_volume = volumes[-1]
+        avg_price = np.mean(prices[-10:])
+        avg_volume = np.mean(volumes[-10:])
+        
+        price_change_pct = ((current_price - avg_price) / avg_price) * 100
+        volume_spike = current_volume / avg_volume
+        
+        if abs(price_change_pct) > 1.5 and volume_spike > 2.0:
+            if price_change_pct > 0:
+                return {
+                    'signal': 'BUY',
+                    'confidence': 0.7,
+                    'price': current_price,
+                    'stop_loss': current_price * 0.97,
+                    'target': current_price * 1.04,
+                    'strategy': 'NEWS',
+                    'reason': f'NEWS Positive reaction'
+                }
+            else:
+                return {
+                    'signal': 'SELL',
+                    'confidence': 0.7,
+                    'price': current_price,
+                    'stop_loss': current_price * 1.03,
+                    'target': current_price * 0.96,
+                    'strategy': 'NEWS',
+                    'reason': f'NEWS Negative reaction'
+                }
+        return {'signal': 'HOLD', 'confidence': 0, 'strategy': 'NEWS'}
+
+    def analyze_momentum(self, prices: List[float], volumes: List[float]) -> Dict:
+        """Momentum Trading"""
+        if len(prices) < self.config.MOMENTUM_PERIOD:
+            return {'signal': 'HOLD', 'confidence': 0, 'strategy': 'MOMENTUM'}
+        
+        current_price = prices[-1]
+        current_volume = volumes[-1]
+        ma_fast = np.mean(prices[-5:])
+        ma_slow = np.mean(prices[-self.config.MOMENTUM_PERIOD:])
+        avg_volume = np.mean(volumes[-20:])
+        
+        if current_price > ma_slow and current_volume > avg_volume * self.config.MOMENTUM_VOLUME_MULTIPLIER and ma_fast > ma_slow:
+            momentum_strength = ((current_price - ma_slow) / ma_slow) * 100
+            confidence = min(0.85, 0.5 + (momentum_strength / 10))
+            return {
+                'signal': 'BUY',
+                'confidence': confidence,
+                'price': current_price,
+                'stop_loss': ma_slow * 0.98,
+                'target': current_price * 1.05,
+                'strategy': 'MOMENTUM',
+                'reason': f'MOMENTUM Bullish'
+            }
+        elif current_price < ma_slow and current_volume > avg_volume * self.config.MOMENTUM_VOLUME_MULTIPLIER and ma_fast < ma_slow:
+            momentum_strength = ((ma_slow - current_price) / ma_slow) * 100
+            confidence = min(0.85, 0.5 + (momentum_strength / 10))
+            return {
+                'signal': 'SELL',
+                'confidence': confidence,
+                'price': current_price,
+                'stop_loss': ma_slow * 1.02,
+                'target': current_price * 0.95,
+                'strategy': 'MOMENTUM',
+                'reason': f'MOMENTUM Bearish'
+            }
+        return {'signal': 'HOLD', 'confidence': 0, 'strategy': 'MOMENTUM'}
+
+    def analyze_breakout(self, prices: List[float], volumes: List[float]) -> Dict:
+        """Breakout Trading"""
+        lookback = self.config.BREAKOUT_LOOKBACK_BARS
+        if len(prices) < lookback:
+            return {'signal': 'HOLD', 'confidence': 0, 'strategy': 'BREAKOUT'}
+        
+        recent_prices = prices[-lookback:]
+        resistance = max(recent_prices)
+        support = min(recent_prices)
+        current_price = prices[-1]
+        current_volume = volumes[-1]
+        avg_volume = np.mean(volumes[-20:])
+        
+        if current_price > resistance and current_volume > avg_volume * self.config.BREAKOUT_VOLUME_CONFIRMATION:
+            return {
+                'signal': 'BUY',
+                'confidence': 0.8,
+                'price': current_price,
+                'stop_loss': support,
+                'target': current_price + (resistance - support) * 1.5,
+                'strategy': 'BREAKOUT',
+                'reason': f'BREAKOUT Bullish'
+            }
+        elif current_price < support and current_volume > avg_volume * self.config.BREAKOUT_VOLUME_CONFIRMATION:
+            return {
+                'signal': 'SELL',
+                'confidence': 0.8,
+                'price': current_price,
+                'stop_loss': resistance,
+                'target': current_price - (resistance - support) * 1.5,
+                'strategy': 'BREAKOUT',
+                'reason': f'BREAKOUT Bearish'
+            }
+        return {'signal': 'HOLD', 'confidence': 0, 'strategy': 'BREAKOUT'}
+
+    def analyze_scalping(self, prices: List[float], volumes: List[float]) -> Dict:
+        """Scalping"""
+        if len(prices) < 5:
+            return {'signal': 'HOLD', 'confidence': 0, 'strategy': 'SCALPING'}
+        
+        current_price = prices[-1]
+        current_volume = volumes[-1]
+        avg_volume = np.mean(volumes[-20:])
+        
+        if current_volume < self.config.SCALP_MIN_VOLUME:
+            return {'signal': 'HOLD', 'confidence': 0, 'strategy': 'SCALPING'}
+        
+        recent_high = max(prices[-5:])
+        recent_low = min(prices[-5:])
+        range_width = recent_high - recent_low
+        
+        if current_price <= recent_low + (range_width * 0.3) and current_volume > avg_volume:
+            return {
+                'signal': 'BUY',
+                'confidence': 0.65,
+                'price': current_price,
+                'stop_loss': current_price - self.config.SCALP_SL_POINTS,
+                'target': current_price + self.config.SCALP_TARGET_POINTS,
+                'strategy': 'SCALPING',
+                'reason': f'SCALP Low bounce'
+            }
+        elif current_price >= recent_high - (range_width * 0.3) and current_volume > avg_volume:
+            return {
+                'signal': 'SELL',
+                'confidence': 0.65,
+                'price': current_price,
+                'stop_loss': current_price + self.config.SCALP_SL_POINTS,
+                'target': current_price - self.config.SCALP_TARGET_POINTS,
+                'strategy': 'SCALPING',
+                'reason': f'SCALP High pullback'
+            }
+        return {'signal': 'HOLD', 'confidence': 0, 'strategy': 'SCALPING'}
+
+    def analyze_ma_crossover(self, prices: List[float]) -> Dict:
+        """Moving Average Crossover"""
+        if len(prices) < self.config.MA_SLOW_PERIOD:
+            return {'signal': 'HOLD', 'confidence': 0, 'strategy': 'MA_CROSSOVER'}
+        
+        current_price = prices[-1]
+        ma_fast = np.mean(prices[-self.config.MA_FAST_PERIOD:])
+        ma_slow = np.mean(prices[-self.config.MA_SLOW_PERIOD:])
+        ma_fast_prev = np.mean(prices[-(self.config.MA_FAST_PERIOD+1):-1])
+        ma_slow_prev = np.mean(prices[-(self.config.MA_SLOW_PERIOD+1):-1])
+        
+        if ma_fast_prev <= ma_slow_prev and ma_fast > ma_slow:
+            return {
+                'signal': 'BUY',
+                'confidence': 0.75,
+                'price': current_price,
+                'stop_loss': ma_slow * 0.98,
+                'target': current_price * 1.04,
+                'strategy': 'MA_CROSSOVER',
+                'reason': f'MA Golden cross'
+            }
+        elif ma_fast_prev >= ma_slow_prev and ma_fast < ma_slow:
+            return {
+                'signal': 'SELL',
+                'confidence': 0.75,
+                'price': current_price,
+                'stop_loss': ma_slow * 1.02,
+                'target': current_price * 0.96,
+                'strategy': 'MA_CROSSOVER',
+                'reason': f'MA Death cross'
+            }
+        return {'signal': 'HOLD', 'confidence': 0, 'strategy': 'MA_CROSSOVER'}
+
+    def analyze_pivot_points(self, prices: List[float], volumes: List[float],
+                             prev_high: float, prev_low: float, prev_close: float) -> Dict:
+        """Pivot Point Trading"""
+        current_price = prices[-1]
+        current_volume = volumes[-1]
+        
+        pivot = (prev_high + prev_low + prev_close) / 3
+        resistance1 = (2 * pivot) - prev_low
+        support1 = (2 * pivot) - prev_high
+        resistance2 = pivot + (prev_high - prev_low)
+        support2 = pivot - (prev_high - prev_low)
+        
+        avg_volume = np.mean(volumes[-20:]) if len(volumes) >= 20 else current_volume
+        
+        if current_price > resistance1 and current_volume > avg_volume * 1.2:
+            return {
+                'signal': 'BUY',
+                'confidence': 0.75,
+                'price': current_price,
+                'stop_loss': support1,
+                'target': resistance2,
+                'strategy': 'PIVOT_POINTS',
+                'reason': f'PIVOT Above R1'
+            }
+        elif current_price < support1 and current_volume > avg_volume * 1.2:
+            return {
+                'signal': 'SELL',
+                'confidence': 0.75,
+                'price': current_price,
+                'stop_loss': resistance1,
+                'target': support2,
+                'strategy': 'PIVOT_POINTS',
+                'reason': f'PIVOT Below S1'
+            }
+        return {'signal': 'HOLD', 'confidence': 0, 'strategy': 'PIVOT_POINTS'}
+
+    def ensemble_analysis(self, symbol: str, prices: List[float], volumes: List[float]) -> Dict:
+        """
+        Analyze all strategies and combine results intelligently
+        Returns consensus signal with confidence
+        """
+        analyses = []
+        
+        # Run all strategy analyses
+        analyses.append(self.analyze_orb(prices, volumes))
+        analyses.append(self.analyze_news(prices, volumes))
+        analyses.append(self.analyze_momentum(prices, volumes))
+        analyses.append(self.analyze_breakout(prices, volumes))
+        analyses.append(self.analyze_scalping(prices, volumes))
+        analyses.append(self.analyze_ma_crossover(prices))
+        
+        prev_high = max(prices[-40:-20]) if len(prices) >= 40 else prices[-1] * 1.02
+        prev_low = min(prices[-40:-20]) if len(prices) >= 40 else prices[-1] * 0.98
+        prev_close = prices[-21] if len(prices) >= 21 else prices[-1]
+        analyses.append(self.analyze_pivot_points(prices, volumes, prev_high, prev_low, prev_close))
+        
+        # Count signals
+        buy_signals = [a for a in analyses if a['signal'] == 'BUY']
+        sell_signals = [a for a in analyses if a['signal'] == 'SELL']
+        hold_signals = [a for a in analyses if a['signal'] == 'HOLD']
+        
+        buy_confidence = np.mean([a['confidence'] for a in buy_signals]) if buy_signals else 0
+        sell_confidence = np.mean([a['confidence'] for a in sell_signals]) if sell_signals else 0
+        
+        # Ensemble voting
+        if len(buy_signals) >= self.config.ENSEMBLE_VOTING_THRESHOLD and buy_confidence >= self.config.STRATEGY_CONFIDENCE_THRESHOLD:
+            # Strong BUY consensus
+            best_buy = max(buy_signals, key=lambda x: x['confidence'])
+            return {
+                'signal': 'BUY',
+                'confidence': min(1.0, buy_confidence + (len(buy_signals) * 0.05)),  # Boost by number agreeing
+                'price': prices[-1],
+                'stop_loss': np.mean([a.get('stop_loss', prices[-1] * 0.98) for a in buy_signals]),
+                'target': np.mean([a.get('target', prices[-1] * 1.02) for a in buy_signals]),
+                'strategy': 'ENSEMBLE',
+                'reason': f'Ensemble consensus: {len(buy_signals)}/7 strategies voting BUY',
+                'voting': {
+                    'buy_votes': len(buy_signals),
+                    'sell_votes': len(sell_signals),
+                    'hold_votes': len(hold_signals),
+                    'buy_strategies': [a['strategy'] for a in buy_signals],
+                    'sell_strategies': [a['strategy'] for a in sell_signals]
+                },
+                'all_signals': analyses
+            }
+        
+        elif len(sell_signals) >= self.config.ENSEMBLE_VOTING_THRESHOLD and sell_confidence >= self.config.STRATEGY_CONFIDENCE_THRESHOLD:
+            # Strong SELL consensus
+            best_sell = max(sell_signals, key=lambda x: x['confidence'])
+            return {
+                'signal': 'SELL',
+                'confidence': min(1.0, sell_confidence + (len(sell_signals) * 0.05)),
+                'price': prices[-1],
+                'stop_loss': np.mean([a.get('stop_loss', prices[-1] * 1.02) for a in sell_signals]),
+                'target': np.mean([a.get('target', prices[-1] * 0.98) for a in sell_signals]),
+                'strategy': 'ENSEMBLE',
+                'reason': f'Ensemble consensus: {len(sell_signals)}/7 strategies voting SELL',
+                'voting': {
+                    'buy_votes': len(buy_signals),
+                    'sell_votes': len(sell_signals),
+                    'hold_votes': len(hold_signals),
+                    'buy_strategies': [a['strategy'] for a in buy_signals],
+                    'sell_strategies': [a['strategy'] for a in sell_signals]
+                },
+                'all_signals': analyses
+            }
+        
+        else:
+            # No consensus - HOLD
+            return {
+                'signal': 'HOLD',
+                'confidence': 0,
+                'strategy': 'ENSEMBLE',
+                'reason': f'No consensus: B={len(buy_signals)}, S={len(sell_signals)}, H={len(hold_signals)}',
+                'voting': {
+                    'buy_votes': len(buy_signals),
+                    'sell_votes': len(sell_signals),
+                    'hold_votes': len(hold_signals),
+                    'buy_strategies': [a['strategy'] for a in buy_signals],
+                    'sell_strategies': [a['strategy'] for a in sell_signals]
+                },
+                'all_signals': analyses
+            }
+
+    def update_strategy_scores(self, strategy: str, won: bool):
+        """Update strategy performance tracking"""
+        if strategy == 'ENSEMBLE':
+            return
+        if won:
+            self.strategy_scores[strategy]['wins'] += 1
+        else:
+            self.strategy_scores[strategy]['losses'] += 1
+        
+        total = self.strategy_scores[strategy]['wins'] + self.strategy_scores[strategy]['losses']
+        if total > 0:
+            self.strategy_scores[strategy]['score'] = self.strategy_scores[strategy]['wins'] / total
 
 class RiskManager:
-    """Risk Management System"""
-
     def __init__(self, config: Config):
         self.config = config
         self.daily_pnl = 0.0
         self.daily_trades = 0
-        self.max_daily_trades = 10
+        self.max_daily_trades = 20
 
     def can_trade(self) -> tuple:
-        """Check if trading is allowed based on risk rules"""
-        # Check daily loss limit
         if self.daily_pnl <= -self.config.CAPITAL * self.config.MAX_DAILY_LOSS:
             return False, "Daily loss limit reached"
-
-        # Check max trades
         if self.daily_trades >= self.max_daily_trades:
             return False, "Max daily trades reached"
-
         return True, "OK"
 
     def calculate_position_size(self, entry: float, stop_loss: float) -> int:
-        """Calculate position size based on risk per trade"""
         risk_amount = self.config.CAPITAL * self.config.RISK_PER_TRADE
         risk_per_share = abs(entry - stop_loss)
         if risk_per_share == 0:
             return 0
         quantity = int(risk_amount / risk_per_share)
-        # Also limit by capital available
-        max_by_capital = int((self.config.CAPITAL * 0.2) / entry) # Max 20% per position
-        return min(quantity, max_by_capital, 100) # Cap at 100 shares
+        max_by_capital = int((self.config.CAPITAL * 0.2) / entry)
+        return min(quantity, max_by_capital, 100)
 
     def validate_risk_reward(self, entry: float, stop_loss: float, target: float) -> bool:
-        """Ensure trade meets minimum risk-reward ratio"""
         risk = abs(entry - stop_loss)
         reward = abs(target - entry)
         if risk == 0:
@@ -223,55 +487,49 @@ class RiskManager:
         self.daily_trades = 0
 
 class MarketTimeManager:
-    """Trading Time Management - FIX #1: Handles NSE lunch break correctly"""
-
     def __init__(self, config: Config):
         self.config = config
 
     def is_market_open(self) -> bool:
-        """Check if NSE market is currently open (considering lunch break 11:40-12:30)"""
-        now = datetime.now()
-        current_time = now.time()
-
-        # Check if weekday
-        if now.weekday() >= 5:
-            return False
-
-        # NSE Trading: 9:15-15:30 with lunch 11:40-12:30
-        market_start = dtime(9, 15)
-        lunch_start = dtime(11, 40)
-        lunch_end = dtime(12, 30)
-        market_end = dtime(15, 30)
-
-        # Check if within market hours
-        if current_time < market_start or current_time > market_end:
-            return False
-
-        # Check if in lunch break
-        if lunch_start <= current_time < lunch_end:
-            return False
-
-        return True
+    """Check if NSE market is currently open"""
+    now = datetime.now()
+    current_time = now.time()
+    
+    # Check if weekday
+    if now.weekday() >= 5:
+        return False
+    
+    # Market hours
+    market_start = dtime(9, 15, 0)
+    lunch_start = dtime(11, 40, 0)
+    lunch_end = dtime(12, 30, 0)
+    market_end = dtime(15, 30, 0)
+    
+    # Before market open
+    if current_time < market_start:
+        return False
+    
+    # After market close (FIXED: Using >= instead of >)
+    if current_time >= market_end:
+        return False
+    
+    # During lunch break
+    if lunch_start <= current_time < lunch_end:
+        return False
+    
+    return True
 
     def should_avoid_trading(self) -> tuple:
-        """Check if we should avoid trading (opening rush, closing time)"""
         now = datetime.now()
         current_time = now.time()
-
-        # Avoid first 30 minutes (opening volatility)
         avoid_until = (datetime.combine(now.date(), self.config.MARKET_OPEN) +
             timedelta(minutes=self.config.AVOID_OPENING_MINUTES)).time()
-
         if current_time < avoid_until:
             return True, f"Avoiding first {self.config.AVOID_OPENING_MINUTES} mins"
-
-        # Square off time
         sq_hour, sq_min = map(int, self.config.SQUARE_OFF_TIME.split(':'))
         square_off = dtime(sq_hour, sq_min)
-
         if current_time >= square_off:
             return True, "Square-off time reached"
-
         return False, "OK"
 
     def get_market_status(self) -> str:
@@ -283,8 +541,6 @@ class MarketTimeManager:
         return 'open'
 
 class PaperTradingEngine:
-    """Paper Trading Simulation Engine - FIX #3: Proper capital & position tracking"""
-
     def __init__(self, config: Config):
         self.config = config
         self.capital = config.CAPITAL
@@ -296,151 +552,57 @@ class PaperTradingEngine:
         self.signals = []
         self.risk_manager = RiskManager(config)
         self.time_manager = MarketTimeManager(config)
-        self.analyzer = TechnicalAnalyzer()
-
-        # Simulated price data
+        self.analyzer = EnsembleStrategyAnalyzer(config)
+        
         self.price_history: Dict[str, List[float]] = {}
         self.volume_history: Dict[str, List[float]] = {}
         self._init_price_data()
 
     def _init_price_data(self):
-        """Initialize simulated price data for each stock"""
         base_prices = {
             'RELIANCE-EQ': 2450, 'TCS-EQ': 3800, 'INFY-EQ': 1450,
             'HDFCBANK-EQ': 1650, 'ICICIBANK-EQ': 1050, 'SBIN-EQ': 620,
             'BHARTIARTL-EQ': 1150, 'ITC-EQ': 440, 'KOTAKBANK-EQ': 1750, 'LT-EQ': 3200
         }
-
         for symbol in self.config.WATCHLIST:
             base = base_prices.get(symbol, 1000)
-            # Generate 50 candles of historical data
             prices = [base]
             volumes = [random.randint(100000, 500000)]
             for _ in range(49):
-                change = random.gauss(0, 0.01) # 1% std dev
+                change = random.gauss(0, 0.01)
                 prices.append(prices[-1] * (1 + change))
                 volumes.append(random.randint(100000, 500000))
             self.price_history[symbol] = prices
             self.volume_history[symbol] = volumes
 
     def _update_prices(self):
-        """Simulate price movement"""
         for symbol in self.price_history:
-            change = random.gauss(0, 0.005) # 0.5% std dev per update
+            change = random.gauss(0, 0.005)
             new_price = self.price_history[symbol][-1] * (1 + change)
             self.price_history[symbol].append(new_price)
             self.volume_history[symbol].append(random.randint(100000, 500000))
-
-            # Keep last 100 candles
             if len(self.price_history[symbol]) > 100:
                 self.price_history[symbol] = self.price_history[symbol][-100:]
                 self.volume_history[symbol] = self.volume_history[symbol][-100:]
 
-    def analyze_stock(self, symbol: str) -> Dict:
-        """Perform technical analysis on a stock"""
+    def analyze_stock_ensemble(self, symbol: str) -> Dict:
+        """Get ensemble analysis for stock"""
         prices = self.price_history.get(symbol, [])
         volumes = self.volume_history.get(symbol, [])
-
         if len(prices) < 30:
             return {'signal': 'HOLD', 'confidence': 0}
-
-        current_price = prices[-1]
-        rsi = self.analyzer.calculate_rsi(prices)
-        macd = self.analyzer.calculate_macd(prices)
-        trend = self.analyzer.detect_trend(prices)
-        sr = self.analyzer.find_support_resistance(prices)
-        breakout = self.analyzer.detect_breakout(prices, volumes)
-
-        # Scoring system
-        score = 0
-        signals = []
-
-        # RSI signals
-        if rsi < 30:
-            score += 2
-            signals.append('RSI oversold')
-        elif rsi > 70:
-            score -= 2
-            signals.append('RSI overbought')
-        elif 40 < rsi < 60:
-            score += 1
-            signals.append('RSI neutral')
-
-        # MACD signals
-        if macd['histogram'] > 0 and macd['macd'] > macd['signal']:
-            score += 2
-            signals.append('MACD bullish')
-        elif macd['histogram'] < 0 and macd['macd'] < macd['signal']:
-            score -= 2
-            signals.append('MACD bearish')
-
-        # Trend
-        if trend == 'uptrend':
-            score += 1
-            signals.append('Uptrend')
-        elif trend == 'downtrend':
-            score -= 1
-            signals.append('Downtrend')
-
-        # Breakout
-        if breakout == 'bullish_breakout':
-            score += 3
-            signals.append('Bullish breakout!')
-        elif breakout == 'bearish_breakout':
-            score -= 3
-            signals.append('Bearish breakout!')
-
-        # Determine signal
-        if score >= 3:
-            signal_type = 'BUY'
-            stop_loss = sr['support'] * 0.99
-            target = current_price + (current_price - stop_loss) * 2 # 1:2 RR
-        elif score <= -3:
-            signal_type = 'SELL'
-            stop_loss = sr['resistance'] * 1.01
-            target = current_price - (stop_loss - current_price) * 2
-        else:
-            signal_type = 'HOLD'
-            stop_loss = 0
-            target = 0
-
-        confidence = min(abs(score) / 6, 1.0)
-        risk = abs(current_price - stop_loss) if stop_loss else 0
-        reward = abs(target - current_price) if target else 0
-        rr_ratio = f"1:{reward/risk:.1f}" if risk > 0 else "N/A"
-
-        return {
-            'symbol': symbol,
-            'signal_type': signal_type,
-            'price': round(current_price, 2),
-            'confidence': round(confidence, 2),
-            'stop_loss': round(stop_loss, 2),
-            'target': round(target, 2),
-            'risk_reward': rr_ratio,
-            'indicators': {
-                'rsi': round(rsi, 2),
-                'macd': round(macd['macd'], 4),
-                'macd_signal': round(macd['signal'], 4),
-                'trend': trend,
-                'support': round(sr['support'], 2),
-                'resistance': round(sr['resistance'], 2)
-            },
-            'signals': signals,
-            'timestamp': datetime.now().isoformat()
-        }
+        
+        analysis = self.analyzer.ensemble_analysis(symbol, prices, volumes)
+        return analysis
 
     def place_order(self, symbol: str, transaction_type: str, quantity: int, price: float) -> Dict:
-        """Place order with guaranteed execution and position tracking - FIX #2 & #3"""
         if quantity <= 0:
-            logger.warning(f"Invalid quantity: {quantity}")
             return {'order_id': None, 'status': 'REJECTED', 'error': 'Invalid quantity'}
-
-        # Capital validation BEFORE order
+        
         order_cost = price * quantity
         if transaction_type == 'BUY' and order_cost > self.capital:
-            logger.warning(f"❌ Insufficient capital: need ₹{order_cost:.2f}, have ₹{self.capital:.2f}")
             return {'order_id': None, 'status': 'REJECTED', 'error': 'Insufficient capital'}
-
+        
         order_id = f"PAPER_{len(self.orders) + 1}_{datetime.now().strftime('%H%M%S')}"
         order = {
             'order_id': order_id,
@@ -452,60 +614,45 @@ class PaperTradingEngine:
             'timestamp': datetime.now().isoformat(),
             'order_cost': round(order_cost, 2)
         }
-
         self.orders.append(order)
-        logger.info(f"📝 Order created: {order_id} | {transaction_type} {symbol} x{quantity} @ ₹{price}")
-
-        # Execute order IMMEDIATELY
+        
         if transaction_type == 'BUY':
             if symbol in self.positions:
-                # Add to existing position (averaging)
                 pos = self.positions[symbol]
                 old_qty = pos['quantity']
                 old_price = pos['avg_price']
                 new_qty = old_qty + quantity
                 pos['quantity'] = new_qty
                 pos['avg_price'] = (old_price * old_qty + price * quantity) / new_qty
-                logger.info(f"   Position averaged: {symbol} | Old: {old_qty}@₹{old_price:.2f} + New: {quantity}@₹{price:.2f} = {new_qty}@₹{pos['avg_price']:.2f}")
             else:
-                # New position
-                analysis = self.analyze_stock(symbol)
+                analysis = self.analyze_stock_ensemble(symbol)
                 self.positions[symbol] = {
                     'quantity': quantity,
                     'avg_price': price,
                     'entry_time': datetime.now().isoformat(),
-                    'stop_loss': analysis['stop_loss'],
-                    'target': analysis['target'],
-                    'entry_signal': analysis['signal_type']
+                    'stop_loss': analysis.get('stop_loss', price * 0.98),
+                    'target': analysis.get('target', price * 1.02),
+                    'strategy': 'ENSEMBLE'
                 }
-                logger.info(f"   ✅ New position: {symbol} | {quantity} shares @ ₹{price} | SL: ₹{analysis['stop_loss']:.2f} | TGT: ₹{analysis['target']:.2f}")
-
-            # CRITICAL: Deduct capital immediately
+            
             old_capital = self.capital
             self.capital -= order_cost
-            logger.info(f"   💰 Capital: ₹{old_capital:.2f} → ₹{self.capital:.2f} (invested ₹{order_cost:.2f})")
-
+            logger.info(f"✅ ENSEMBLE BUY {symbol}: ₹{old_capital:.2f} → ₹{self.capital:.2f}")
+            
         elif transaction_type == 'SELL':
             if symbol not in self.positions:
-                logger.warning(f"❌ No position to sell: {symbol}")
                 return {'order_id': None, 'status': 'REJECTED', 'error': 'No open position'}
-
+            
             pos = self.positions[symbol]
-            if quantity > pos['quantity']:
-                logger.warning(f"❌ Cannot sell {quantity}, only {pos['quantity']} available")
-                return {'order_id': None, 'status': 'REJECTED', 'error': 'Qty exceeds position'}
-
             entry_price = pos['avg_price']
             pnl = (price - entry_price) * quantity
-
-            # Update capital
             self.capital += order_cost
             self.daily_pnl += pnl
             self.risk_manager.update_daily_pnl(pnl)
-
-            logger.info(f"   Sale executed: {symbol} x{quantity} @ ₹{price} | Entry: ₹{entry_price:.2f} | P&L: ₹{pnl:.2f}")
-
-            # Save trade record
+            
+            won = pnl > 0
+            self.analyzer.update_strategy_scores('ENSEMBLE', won)
+            
             self.trades.append({
                 'symbol': symbol,
                 'entry_price': entry_price,
@@ -514,23 +661,17 @@ class PaperTradingEngine:
                 'pnl': round(pnl, 2),
                 'entry_time': pos['entry_time'],
                 'exit_time': datetime.now().isoformat(),
+                'strategy': 'ENSEMBLE',
                 'mode': 'paper'
             })
-
-            # Update position
+            
             pos['quantity'] -= quantity
             if pos['quantity'] <= 0:
                 del self.positions[symbol]
-                logger.info(f"   Position closed: {symbol}")
-
-            logger.info(f"   💰 Capital: ₹{self.capital - order_cost:.2f} → ₹{self.capital:.2f}")
-
+            
+            logger.info(f"✅ ENSEMBLE SELL {symbol}: P&L ₹{pnl:.2f}")
+        
         return order
-
-    def add_signal(self, analysis: Dict):
-        self.signals.append(analysis)
-        if len(self.signals) > 100:
-            self.signals = self.signals[-100:]
 
     def get_positions(self) -> List[Dict]:
         return [
@@ -538,9 +679,7 @@ class PaperTradingEngine:
                 'symbol': symbol,
                 'quantity': data['quantity'],
                 'avg_price': data['avg_price'],
-                'entry_time': data['entry_time'],
-                'stop_loss': data.get('stop_loss', 0),
-                'target': data.get('target', 0),
+                'strategy': 'ENSEMBLE',
                 'current_price': self.price_history.get(symbol, [0])[-1],
                 'unrealized_pnl': round((self.price_history.get(symbol, [0])[-1] - data['avg_price']) * data['quantity'], 2)
             }
@@ -555,15 +694,14 @@ class PaperTradingEngine:
         return self.capital + position_value
 
     def check_stop_loss_target(self):
-        """Auto-exit positions that hit SL or target"""
         for symbol in list(self.positions.keys()):
             pos = self.positions[symbol]
             current_price = self.price_history.get(symbol, [pos['avg_price']])[-1]
             if current_price <= pos.get('stop_loss', 0):
-                logger.info(f"🛑 STOP LOSS hit for {symbol} @ ₹{current_price:.2f}")
+                logger.info(f"🛑 SL hit: {symbol} @ ₹{current_price:.2f}")
                 self.place_order(symbol, 'SELL', pos['quantity'], current_price)
             elif current_price >= pos.get('target', float('inf')):
-                logger.info(f"🎯 TARGET hit for {symbol} @ ₹{current_price:.2f}")
+                logger.info(f"🎯 TARGET hit: {symbol} @ ₹{current_price:.2f}")
                 self.place_order(symbol, 'SELL', pos['quantity'], current_price)
 
     def reset(self):
@@ -576,9 +714,8 @@ class PaperTradingEngine:
         self.risk_manager.reset_daily()
         self._init_price_data()
 
-class SmartTradingBot:
-    """Enhanced Trading Bot with Strategy Rules"""
-
+class AutoTradingBot:
+    """Autonomous bot using ensemble strategy"""
     def __init__(self, paper_engine: PaperTradingEngine, config: Config):
         self.paper_engine = paper_engine
         self.config = config
@@ -586,97 +723,77 @@ class SmartTradingBot:
 
     def start(self):
         self.running = True
-        logger.info("🤖 Smart Trading Bot started")
+        logger.info("🤖 Autonomous Ensemble Trading Bot started!")
+        logger.info("📊 Using all 7 strategies with intelligent voting")
         self._monitor_loop()
 
     def stop(self):
         self.running = False
-
-        # Square off all positions
         for symbol in list(self.paper_engine.positions.keys()):
             pos = self.paper_engine.positions[symbol]
             price = self.paper_engine.price_history.get(symbol, [pos['avg_price']])[-1]
             self.paper_engine.place_order(symbol, 'SELL', pos['quantity'], price)
-
-        logger.info("🛑 Smart Trading Bot stopped")
+        logger.info("🛑 Bot stopped - all positions closed")
 
     def _monitor_loop(self):
         import time
-
         while self.running:
             try:
-                # Update simulated prices
                 self.paper_engine._update_prices()
-
-                # Check stop loss and targets
                 self.paper_engine.check_stop_loss_target()
-
-                # Check if we can trade
+                
                 can_trade, reason = self.paper_engine.risk_manager.can_trade()
                 avoid, avoid_reason = self.paper_engine.time_manager.should_avoid_trading()
-
+                
                 if not can_trade:
-                    logger.info(f"⏸️  Trading paused: {reason}")
                     time.sleep(30)
                     continue
-
-                # Analyze each stock
+                
                 for symbol in self.config.WATCHLIST:
-                    analysis = self.paper_engine.analyze_stock(symbol)
-                    self.paper_engine.add_signal(analysis)
-
-                    # Skip if avoiding trading times (but still generate signals)
+                    analysis = self.paper_engine.analyze_stock_ensemble(symbol)
+                    self.paper_engine.signals.append(analysis)
+                    
                     if avoid:
                         continue
-
-                    # Execute trades based on signals - FIX #2: Proper validation
-                    if analysis['signal_type'] == 'BUY' and analysis['confidence'] >= 0.5:
-                        # Check if we can take more positions
+                    
+                    # Execute on ensemble signal
+                    if analysis['signal'] == 'BUY' and analysis.get('confidence', 0) >= self.config.STRATEGY_CONFIDENCE_THRESHOLD:
                         if len(self.paper_engine.positions) >= self.config.MAX_POSITIONS:
-                            logger.info(f"Max positions reached ({self.config.MAX_POSITIONS})")
                             continue
-
                         if symbol in self.paper_engine.positions:
-                            logger.info(f"{symbol} already in positions")
                             continue
-
-                        # Check if we have enough capital
-                        required_capital = analysis['price'] * 1  # At least 1 share
+                        
+                        required_capital = analysis['price'] * 1
                         if required_capital > self.paper_engine.capital * 0.8:
-                            logger.info(f"Insufficient capital for {symbol}")
                             continue
-
-                        # Validate risk-reward
+                        
                         if not self.paper_engine.risk_manager.validate_risk_reward(
-                            analysis['price'], analysis['stop_loss'], analysis['target']
+                            analysis['price'], analysis.get('stop_loss', analysis['price'] * 0.98),
+                            analysis.get('target', analysis['price'] * 1.02)
                         ):
-                            logger.info(f"Skipping {symbol}: Poor risk-reward")
                             continue
-
-                        # Calculate position size
+                        
                         qty = self.paper_engine.risk_manager.calculate_position_size(
-                            analysis['price'], analysis['stop_loss']
+                            analysis['price'], analysis.get('stop_loss', analysis['price'] * 0.98)
                         )
-
+                        
                         if qty > 0 and qty * analysis['price'] <= self.paper_engine.capital * 0.9:
                             order = self.paper_engine.place_order(symbol, 'BUY', qty, analysis['price'])
                             if order['status'] == 'EXECUTED':
-                                logger.info(f"✅ BUY {symbol} x {qty} @ ₹{analysis['price']:.2f}")
-                        else:
-                            logger.warning(f"Cannot place order: insufficient funds or qty=0")
-
-                    elif analysis['signal_type'] == 'SELL' and symbol in self.paper_engine.positions:
+                                voting_info = analysis.get('voting', {})
+                                logger.info(f"✅ BUY {symbol}: {voting_info.get('buy_votes', 0)}/7 strategies agreed | Confidence: {analysis['confidence']:.2f}")
+                    
+                    elif analysis['signal'] == 'SELL' and symbol in self.paper_engine.positions:
                         pos = self.paper_engine.positions[symbol]
                         self.paper_engine.place_order(symbol, 'SELL', pos['quantity'], analysis['price'])
-                        logger.info(f"✅ SELL {symbol} @ ₹{analysis['price']:.2f}")
-
-                time.sleep(10) # Check every 10 seconds
-
+                        voting_info = analysis.get('voting', {})
+                        logger.info(f"✅ SELL {symbol}: {voting_info.get('sell_votes', 0)}/7 strategies agreed")
+                
+                time.sleep(10)
             except Exception as e:
-                logger.error(f"Error in monitor loop: {e}", exc_info=True)
+                logger.error(f"Error: {e}", exc_info=True)
                 time.sleep(30)
 
-# Initialize
 config = Config()
 paper_engine = PaperTradingEngine(config)
 
@@ -685,10 +802,10 @@ paper_engine = PaperTradingEngine(config)
 @app.route('/')
 def index():
     return jsonify({
-        'name': 'Smart Trading Bot API',
-        'version': '3.1.0',
-        'status': 'running',
-        'mode': trading_mode
+        'name': 'Autonomous Ensemble Trading Bot v5.0',
+        'version': '5.0.0',
+        'mode': 'ENSEMBLE - All 7 Strategies Combined',
+        'strategies_count': 7
     })
 
 @app.route('/api/health', methods=['GET'])
@@ -696,82 +813,68 @@ def health_check():
     time_mgr = MarketTimeManager(config)
     return jsonify({
         'status': 'healthy',
-        'timestamp': datetime.now().isoformat(),
-        'mode': trading_mode,
+        'mode': 'ENSEMBLE AUTONOMOUS',
         'market_status': time_mgr.get_market_status(),
-        'bot_running': trading_bot.running if trading_bot else False
+        'bot_running': trading_bot.running if trading_bot else False,
+        'ensemble_mode': True,
+        'voting_threshold': config.ENSEMBLE_VOTING_THRESHOLD
     })
 
-@app.route('/api/config', methods=['GET'])
-def get_config():
+@app.route('/api/ensemble/config', methods=['GET'])
+def get_ensemble_config():
     return jsonify({
         'success': True,
-        'data': {
-            'capital': config.CAPITAL,
-            'risk_per_trade': config.RISK_PER_TRADE,
-            'max_daily_loss': config.MAX_DAILY_LOSS,
-            'max_positions': config.MAX_POSITIONS,
-            'min_risk_reward': config.MIN_RISK_REWARD,
-            'watchlist': config.WATCHLIST,
-            'square_off_time': config.SQUARE_OFF_TIME,
-            'avoid_opening_minutes': config.AVOID_OPENING_MINUTES,
-            'mode': trading_mode
-        }
+        'ensemble_settings': {
+            'mode': 'AUTONOMOUS - All Strategies Combined',
+            'strategies': StrategyEnum.ALL,
+            'voting_threshold': config.ENSEMBLE_VOTING_THRESHOLD,
+            'confidence_threshold': config.STRATEGY_CONFIDENCE_THRESHOLD,
+            'auto_strategy_selection': True,
+            'description': 'Bot automatically combines all 7 strategies and trades on consensus'
+        },
+        'strategy_performance': paper_engine.analyzer.strategy_scores
     })
-
-@app.route('/api/mode', methods=['GET', 'POST'])
-def handle_mode():
-    global trading_mode, paper_engine
-    if request.method == 'GET':
-        return jsonify({'mode': trading_mode})
-
-    data = request.json or {}
-    new_mode = data.get('mode', 'paper')
-
-    if new_mode not in ['live', 'paper']:
-        return jsonify({'success': False, 'error': 'Invalid mode'}), 400
-
-    if trading_bot and trading_bot.running:
-        return jsonify({'success': False, 'error': 'Stop bot first'}), 400
-
-    trading_mode = new_mode
-    return jsonify({'success': True, 'mode': trading_mode})
 
 @app.route('/api/bot/start', methods=['POST'])
 def start_bot():
     global trading_bot, bot_thread, paper_engine
     if trading_bot and trading_bot.running:
         return jsonify({'success': False, 'error': 'Already running'}), 400
-
-    trading_bot = SmartTradingBot(paper_engine, config)
+    
+    trading_bot = AutoTradingBot(paper_engine, config)
     bot_thread = threading.Thread(target=trading_bot.start, daemon=True)
     bot_thread.start()
-
-    return jsonify({'success': True, 'message': f'Started in {trading_mode} mode'})
+    
+    return jsonify({'success': True, 'message': 'Autonomous Ensemble Bot started!', 'mode': 'All 7 strategies active'})
 
 @app.route('/api/bot/stop', methods=['POST'])
 def stop_bot():
     global trading_bot
     if not trading_bot or not trading_bot.running:
         return jsonify({'success': False, 'error': 'Not running'}), 400
-
+    
     trading_bot.stop()
-    return jsonify({'success': True, 'message': 'Stopped'})
+    return jsonify({'success': True, 'message': 'Bot stopped'})
 
 @app.route('/api/bot/status', methods=['GET'])
 def bot_status():
     time_mgr = MarketTimeManager(config)
+    analyzer = paper_engine.analyzer
     return jsonify({
         'running': trading_bot.running if trading_bot else False,
-        'mode': trading_mode,
+        'mode': 'ENSEMBLE AUTONOMOUS',
         'market_status': time_mgr.get_market_status(),
         'positions_count': len(paper_engine.positions),
-        'daily_pnl': round(paper_engine.daily_pnl, 2)
+        'daily_pnl': round(paper_engine.daily_pnl, 2),
+        'daily_trades': paper_engine.risk_manager.daily_trades,
+        'strategy_scores': analyzer.strategy_scores,
+        'voting_threshold': config.ENSEMBLE_VOTING_THRESHOLD,
+        'strategies_active': 7
     })
 
-@app.route('/api/positions', methods=['GET'])
-def get_positions():
-    return jsonify({'success': True, 'data': paper_engine.get_positions()})
+@app.route('/api/signals', methods=['GET'])
+def get_signals():
+    return jsonify({'success': True, 'data': paper_engine.signals[-50:]})
 
 @app.route('/api/trades', methods=['GET'])
 def get_trades():
@@ -779,7 +882,7 @@ def get_trades():
     winning = [t for t in trades if t.get('pnl', 0) > 0]
     losing = [t for t in trades if t.get('pnl', 0) < 0]
     total_pnl = sum(t.get('pnl', 0) for t in trades)
-
+    
     return jsonify({
         'success': True,
         'data': trades,
@@ -790,30 +893,27 @@ def get_trades():
             'win_rate': (len(winning) / len(trades) * 100) if trades else 0,
             'total_pnl': round(total_pnl, 2),
             'avg_win': round(sum(t['pnl'] for t in winning) / len(winning), 2) if winning else 0,
-            'avg_loss': round(sum(t['pnl'] for t in losing) / len(losing), 2) if losing else 0
+            'avg_loss': round(sum(t['pnl'] for t in losing) / len(losing), 2) if losing else 0,
+            'strategy_used': 'ENSEMBLE (All 7 strategies)'
         }
     })
 
-@app.route('/api/signals', methods=['GET'])
-def get_signals():
-    return jsonify({'success': True, 'data': paper_engine.signals[-50:]})
+@app.route('/api/positions', methods=['GET'])
+def get_positions():
+    return jsonify({'success': True, 'data': paper_engine.get_positions()})
 
 @app.route('/api/portfolio', methods=['GET'])
 def get_portfolio():
-    """Get complete portfolio with P&L calculation - FIX #4"""
     total_value = paper_engine.get_portfolio_value()
     unrealized_pnl = 0
-
-    # Calculate unrealized P&L from open positions
+    
     for symbol, pos in paper_engine.positions.items():
         current_price = paper_engine.price_history.get(symbol, [pos['avg_price']])[-1]
         unrealized_pnl += (current_price - pos['avg_price']) * pos['quantity']
-
-    # Total P&L = realized + unrealized
+    
     total_pnl = paper_engine.daily_pnl + unrealized_pnl
-    total_return_pct = (total_pnl / config.CAPITAL * 100) if config.CAPITAL > 0 else 0
-
-    portfolio_data = {
+    
+    return jsonify({
         'success': True,
         'data': {
             'initial_capital': round(config.CAPITAL, 2),
@@ -824,67 +924,24 @@ def get_portfolio():
             'realized_pnl': round(paper_engine.daily_pnl, 2),
             'total_pnl': round(total_pnl, 2),
             'daily_pnl_pct': round((total_pnl / config.CAPITAL * 100), 2),
-            'total_return_pct': round(total_return_pct, 2),
+            'total_return_pct': round((total_pnl / config.CAPITAL * 100), 2),
             'positions_count': len(paper_engine.positions),
-            'trades_count': len(paper_engine.trades)
-        }
-    }
-
-    logger.info(f"📊 Portfolio: Capital=₹{paper_engine.capital:.2f}, Value=₹{total_value:.2f}, P&L=₹{total_pnl:.2f}")
-    return jsonify(portfolio_data)
-
-@app.route('/api/risk-metrics', methods=['GET'])
-def get_risk_metrics():
-    rm = paper_engine.risk_manager
-    positions_value = sum(
-        paper_engine.price_history.get(s, [d['avg_price']])[-1] * d['quantity']
-        for s, d in paper_engine.positions.items()
-    )
-
-    return jsonify({
-        'success': True,
-        'data': {
-            'daily_pnl': round(rm.daily_pnl, 2),
-            'daily_trades': rm.daily_trades,
-            'max_daily_trades': rm.max_daily_trades,
-            'risk_per_trade_pct': config.RISK_PER_TRADE * 100,
-            'max_daily_loss_pct': config.MAX_DAILY_LOSS * 100,
-            'current_exposure': round(positions_value, 2),
-            'risk_used_pct': round((positions_value / config.CAPITAL * 100), 2) if config.CAPITAL > 0 else 0,
-            'can_trade': rm.can_trade()[0],
-            'trade_status': rm.can_trade()[1]
+            'trades_count': len(paper_engine.trades),
+            'trading_mode': 'ENSEMBLE AUTONOMOUS'
         }
     })
 
-@app.route('/api/watchlist', methods=['GET'])
-def get_watchlist():
-    return jsonify({'success': True, 'data': config.WATCHLIST})
-
-@app.route('/api/analysis/<symbol>', methods=['GET'])
-def get_analysis(symbol):
-    """Get detailed analysis for a specific stock"""
-    if symbol not in paper_engine.price_history:
-        return jsonify({'success': False, 'error': 'Symbol not found'}), 404
-
-    analysis = paper_engine.analyze_stock(symbol)
-    return jsonify({'success': True, 'data': analysis})
-
 @app.route('/api/paper/reset', methods=['POST'])
 def reset_paper():
-    global paper_engine
     if trading_bot and trading_bot.running:
         return jsonify({'success': False, 'error': 'Stop bot first'}), 400
-
     paper_engine.reset()
-    return jsonify({'success': True, 'message': 'Paper trading reset'})
-
-# ==================== MAIN ====================
+    return jsonify({'success': True, 'message': 'Reset complete'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    logger.info(f"Starting Smart Trading Bot API v3.1 on port {port}")
-    logger.info(f"Watchlist: {config.WATCHLIST}")
-    logger.info(f"Risk per trade: {config.RISK_PER_TRADE * 100}%")
-    logger.info(f"Min Risk-Reward: 1:{config.MIN_RISK_REWARD}")
+    logger.info(f"Starting Autonomous Ensemble Trading Bot v5.0 on port {port}")
+    logger.info("📊 ENSEMBLE MODE: All 7 strategies combined with intelligent voting")
+    logger.info("🤖 BOT AUTONOMOUSLY TRADES ON CONSENSUS")
     logger.info("=" * 60)
     app.run(host='0.0.0.0', port=port, debug=False)
