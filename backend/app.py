@@ -20,17 +20,33 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-CORS(app, resources={
-    r"/api/*": {
-        "origins": [
-            "https://vermillion-kheer-9eeb5f.netlify.app",
-            "http://localhost:3000",
-            "*"
-        ],
-        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type"]
-    }
-})
+# Configure CORS
+CORS(app, 
+     resources={r"/api/*": {
+         "origins": [
+             "https://vermillion-kheer-9eeb5f.netlify.app",  # Your frontend
+             "http://localhost:3000",
+             "http://127.0.0.1:3000"
+         ],
+         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+         "allow_headers": ["Content-Type", "Authorization", "Accept"],
+         "expose_headers": ["Content-Type"],
+         "supports_credentials": True,
+         "max_age": 3600
+     }},
+     send_wildcard=False,
+     automatic_options=True,
+     vary_header=True
+)
+
+# Add response headers
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', 'https://vermillion-kheer-9eeb5f.netlify.app')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,Accept')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Expose-Headers', 'Content-Type')
+    return response
 
 trading_bot = None
 bot_thread = None
@@ -945,3 +961,4 @@ if __name__ == '__main__':
     logger.info("🤖 BOT AUTONOMOUSLY TRADES ON CONSENSUS")
     logger.info("=" * 60)
     app.run(host='0.0.0.0', port=port, debug=False)
+
