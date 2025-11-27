@@ -34,24 +34,30 @@ bot_thread = None
 bot_running = False
 current_mode = "paper"
 paper_engine = None
+DEMO_MODE = False  # ← NOW SET TO FALSE - REAL MARKET MODE!
 
 # ============== MARKET TIME MANAGER ==============
 
 class MarketTimeManager:
-    """Check Indian market hours"""
+    """Check Indian market hours - 9:15 AM to 3:30 PM"""
     
     @staticmethod
     def is_market_open():
-        """Check if market is open (9:15 AM - 3:30 PM, Mon-Fri)"""
+        """Check if market is open"""
         now = datetime.now()
         current_time = now.time()
         current_day = now.weekday()
         
-        # Market closed on weekends (5=Saturday, 6=Sunday)
+        logger.info(f"🕐 Time check: {current_time.strftime('%H:%M:%S')} | Day: {current_day}")
+        
+        # If DEMO_MODE, always return open
+        if DEMO_MODE:
+            return True, "open"
+        
+        # Weekends closed
         if current_day >= 5:
             return False, "closed"
         
-        # Market hours: 9:15 AM - 3:30 PM
         market_open = dtime(9, 15)
         market_close = dtime(15, 30)
         lunch_start = dtime(12, 0)
@@ -67,15 +73,17 @@ class MarketTimeManager:
         
         # During lunch break
         if lunch_start <= current_time < lunch_end:
+            logger.info("🍽️  Lunch break - pausing trades")
             return False, "lunch"
         
+        logger.info("✅ Market OPEN - Ready to trade!")
         return True, "open"
     
     @staticmethod
     def get_market_status():
         """Get market status"""
         is_open, status = MarketTimeManager.is_market_open()
-        return "open" if is_open else status
+        return status
 
 # ============== REAL-TIME DATA FETCHER ==============
 
@@ -767,3 +775,4 @@ if __name__ == '__main__':
         use_reloader=False,
         threaded=True
     )
+
