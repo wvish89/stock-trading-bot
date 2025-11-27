@@ -8,6 +8,7 @@ from flask_cors import CORS
 import threading
 import os
 from datetime import datetime, timedelta, time as dtime
+from zoneinfo import ZoneInfo
 import logging
 import random
 import time as time_module
@@ -42,8 +43,9 @@ class MarketTimeManager:
     
     @staticmethod
     def is_market_open():
-        """Check if market is open"""
-        now = datetime.now()
+        """Check if market is open in IST"""
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))  # ✅ Force Indian time
+
         current_time = now.time()
         current_day = now.weekday()
         
@@ -880,5 +882,6 @@ if __name__ == '__main__':
         use_reloader=False,
         threaded=True
     )
+
 
 
