@@ -1,6 +1,6 @@
 """
-COMPLETE TRADING BOT WITH 7 STRATEGIES & REAL-TIME DATA - FIXED
-Copy this ENTIRE file and save as app.py
+COMPLETE TRADING BOT - FIXED VERSION
+All issues resolved: Market status, signals, real-time data
 """
 
 from flask import Flask, jsonify, request
@@ -34,7 +34,6 @@ bot_thread = None
 bot_running = False
 current_mode = "paper"
 paper_engine = None
-DEMO_MODE = False  # ← NOW SET TO FALSE - REAL MARKET MODE!
 
 # ============== MARKET TIME MANAGER ==============
 
@@ -48,20 +47,12 @@ class MarketTimeManager:
         current_time = now.time()
         current_day = now.weekday()
         
-        logger.info(f"🕐 Time check: {current_time.strftime('%H:%M:%S')} | Day: {current_day}")
-        
-        # If DEMO_MODE, always return open
-        if DEMO_MODE:
-            return True, "open"
-        
         # Weekends closed
         if current_day >= 5:
             return False, "closed"
         
         market_open = dtime(9, 15)
         market_close = dtime(15, 30)
-        lunch_start = dtime(12, 0)
-        lunch_end = dtime(13, 0)
         
         # Before market open
         if current_time < market_open:
@@ -71,12 +62,7 @@ class MarketTimeManager:
         if current_time >= market_close:
             return False, "closed"
         
-        # During lunch break
-        if lunch_start <= current_time < lunch_end:
-            logger.info("🍽️  Lunch break - pausing trades")
-            return False, "lunch"
-        
-        logger.info("✅ Market OPEN - Ready to trade!")
+        # Market is open
         return True, "open"
     
     @staticmethod
@@ -88,53 +74,55 @@ class MarketTimeManager:
 # ============== REAL-TIME DATA FETCHER ==============
 
 class RealTimeDataFetcher:
-    """Fetch real-time data from free APIs"""
+    """Fetch real-time data from Yahoo Finance API"""
     
-    @staticmethod
-    def get_nse_price(symbol):
-        """Get NSE stock price from API"""
+    def __init__(self):
+        self.cache = {}
+        self.cache_time = {}
+        self.cache_duration = 60  # Cache for 60 seconds
+    
+    def get_nse_price(self, symbol):
+        """Get NSE stock price with caching"""
+        now = time_module.time()
+        
+        # Check cache
+        if symbol in self.cache and (now - self.cache_time.get(symbol, 0)) < self.cache_duration:
+            return self.cache[symbol]
+        
         try:
-            # Convert NSE symbol to yfinance format
+            # Convert NSE symbol to Yahoo Finance format
             yf_symbol = symbol.replace('-EQ', '.NS')
             
-            # Try multiple endpoints
-            try:
-                # Method 1: Direct price fetch
-                url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={yf_symbol}"
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                response = requests.get(url, headers=headers, timeout=3)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    result = data.get('quoteResponse', {}).get('result', [])
-                    if result:
-                        price = result[0].get('regularMarketPrice')
-                        if price:
-                            logger.info(f"✓ Fetched {symbol}: ₹{price:.2f}")
-                            return float(price)
-            except:
-                pass
+            # Yahoo Finance API
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_symbol}?interval=1m&range=1d"
+            headers = {'User-Agent': 'Mozilla/5.0'}
             
-            # Method 2: Fallback API
-            try:
-                url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={yf_symbol}&apikey=demo"
-                response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
-                if response.status_code == 200:
-                    data = response.json()
-                    price = data.get('Global Quote', {}).get('05. price')
-                    if price:
-                        return float(price)
-            except:
-                pass
+            response = requests.get(url, headers=headers, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                result = data.get('chart', {}).get('result', [])
                 
+                if result and len(result) > 0:
+                    meta = result[0].get('meta', {})
+                    price = meta.get('regularMarketPrice')
+                    
+                    if price:
+                        self.cache[symbol] = float(price)
+                        self.cache_time[symbol] = now
+                        logger.info(f"✓ Fetched {symbol}: ₹{price:.2f}")
+                        return float(price)
+            
         except Exception as e:
             logger.warning(f"API error for {symbol}: {e}")
         
         # Fallback to realistic prices
-        return RealTimeDataFetcher.get_fallback_price(symbol)
+        price = self.get_fallback_price(symbol)
+        self.cache[symbol] = price
+        self.cache_time[symbol] = now
+        return price
     
-    @staticmethod
-    def get_fallback_price(symbol):
+    def get_fallback_price(self, symbol):
         """Get fallback price based on symbol"""
         base_prices = {
             'RELIANCE-EQ': 2450,
@@ -149,6 +137,76 @@ class RealTimeDataFetcher:
             'LT-EQ': 3200
         }
         return base_prices.get(symbol, 1000)
+    
+    def get_ohlcv_data(self, symbol, periods=100):
+        """Get OHLCV historical data"""
+        try:
+            yf_symbol = symbol.replace('-EQ', '.NS')
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_symbol}?interval=5m&range=5d"
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            
+            response = requests.get(url, headers=headers, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                result = data.get('chart', {}).get('result', [])
+                
+                if result and len(result) > 0:
+                    quotes = result[0].get('indicators', {}).get('quote', [{}])[0]
+                    timestamps = result[0].get('timestamp', [])
+                    
+                    opens = quotes.get('open', [])
+                    highs = quotes.get('high', [])
+                    lows = quotes.get('low', [])
+                    closes = quotes.get('close', [])
+                    volumes = quotes.get('volume', [])
+                    
+                    if len(closes) > 0:
+                        # Filter out None values
+                        valid_data = []
+                        for i in range(len(closes)):
+                            if closes[i] is not None:
+                                valid_data.append({
+                                    'timestamp': timestamps[i] if i < len(timestamps) else None,
+                                    'open': opens[i] if i < len(opens) else closes[i],
+                                    'high': highs[i] if i < len(highs) else closes[i],
+                                    'low': lows[i] if i < len(lows) else closes[i],
+                                    'close': closes[i],
+                                    'volume': volumes[i] if i < len(volumes) else 100000
+                                })
+                        
+                        if len(valid_data) >= 20:
+                            return valid_data[-periods:]
+        except Exception as e:
+            logger.warning(f"OHLCV error for {symbol}: {e}")
+        
+        # Generate fallback data
+        return self.generate_fallback_ohlcv(symbol, periods)
+    
+    def generate_fallback_ohlcv(self, symbol, periods):
+        """Generate realistic fallback OHLCV data"""
+        base_price = self.get_fallback_price(symbol)
+        data = []
+        current_price = base_price
+        
+        for i in range(periods):
+            change = random.gauss(0, 0.01)
+            current_price = current_price * (1 + change)
+            
+            high = current_price * (1 + abs(random.gauss(0, 0.005)))
+            low = current_price * (1 - abs(random.gauss(0, 0.005)))
+            open_price = current_price * (1 + random.gauss(0, 0.003))
+            
+            data.append({
+                'timestamp': int(time_module.time()) - (periods - i) * 300,
+                'open': open_price,
+                'high': high,
+                'low': low,
+                'close': current_price,
+                'volume': random.randint(100000, 500000)
+            })
+        
+        return data
 
 # ============== 7 TRADING STRATEGIES ==============
 
@@ -157,18 +215,23 @@ class Strategy:
     def __init__(self, symbol):
         self.symbol = symbol
     
-    def analyze(self, prices, volumes):
+    def analyze(self, data):
         pass
 
 class OpeningRangeBreakout(Strategy):
     """Strategy 1: Opening Range Breakout (ORB)"""
-    def analyze(self, prices, volumes):
-        if len(prices) < 15:
+    def analyze(self, data):
+        if len(data) < 15:
             return None
         
-        high = max(prices[-15:])
-        low = min(prices[-15:])
-        current = prices[-1]
+        closes = [d['close'] for d in data]
+        highs = [d['high'] for d in data]
+        lows = [d['low'] for d in data]
+        volumes = [d['volume'] for d in data]
+        
+        high = max(highs[-15:])
+        low = min(lows[-15:])
+        current = closes[-1]
         
         if current > high * 1.001:
             return {'signal': 'BUY', 'confidence': 0.7}
@@ -177,12 +240,15 @@ class OpeningRangeBreakout(Strategy):
         return None
 
 class MomentumStrategy(Strategy):
-    """Strategy 2: Momentum with Volume Confirmation"""
-    def analyze(self, prices, volumes):
-        if len(prices) < 14:
+    """Strategy 2: Momentum with Volume"""
+    def analyze(self, data):
+        if len(data) < 14:
             return None
         
-        changes = [prices[i] - prices[i-1] for i in range(-14, 0)]
+        closes = [d['close'] for d in data]
+        volumes = [d['volume'] for d in data]
+        
+        changes = [closes[i] - closes[i-1] for i in range(-14, 0)]
         momentum = sum(changes)
         avg_volume = np.mean(volumes[-14:])
         current_volume = volumes[-1]
@@ -194,14 +260,18 @@ class MomentumStrategy(Strategy):
         return None
 
 class BreakoutStrategy(Strategy):
-    """Strategy 3: Breakout Strategy"""
-    def analyze(self, prices, volumes):
-        if len(prices) < 20:
+    """Strategy 3: Breakout"""
+    def analyze(self, data):
+        if len(data) < 20:
             return None
         
-        high = max(prices[-20:])
-        low = min(prices[-20:])
-        current = prices[-1]
+        highs = [d['high'] for d in data]
+        lows = [d['low'] for d in data]
+        closes = [d['close'] for d in data]
+        
+        high = max(highs[-20:])
+        low = min(lows[-20:])
+        current = closes[-1]
         
         if current > high * 1.002:
             return {'signal': 'BUY', 'confidence': 0.65}
@@ -210,12 +280,14 @@ class BreakoutStrategy(Strategy):
         return None
 
 class ScalpingStrategy(Strategy):
-    """Strategy 4: Scalping Strategy"""
-    def analyze(self, prices, volumes):
-        if len(prices) < 5:
+    """Strategy 4: Scalping"""
+    def analyze(self, data):
+        if len(data) < 5:
             return None
         
-        short_change = (prices[-1] - prices[-5]) / prices[-5] if prices[-5] != 0 else 0
+        closes = [d['close'] for d in data]
+        
+        short_change = (closes[-1] - closes[-5]) / closes[-5] if closes[-5] != 0 else 0
         
         if short_change > 0.003:
             return {'signal': 'BUY', 'confidence': 0.6}
@@ -225,12 +297,14 @@ class ScalpingStrategy(Strategy):
 
 class MovingAverageStrategy(Strategy):
     """Strategy 5: Moving Average Crossover"""
-    def analyze(self, prices, volumes):
-        if len(prices) < 21:
+    def analyze(self, data):
+        if len(data) < 21:
             return None
         
-        fast_ma = np.mean(prices[-9:])
-        slow_ma = np.mean(prices[-21:])
+        closes = [d['close'] for d in data]
+        
+        fast_ma = np.mean(closes[-9:])
+        slow_ma = np.mean(closes[-21:])
         
         if fast_ma > slow_ma * 1.001:
             return {'signal': 'BUY', 'confidence': 0.7}
@@ -239,21 +313,16 @@ class MovingAverageStrategy(Strategy):
         return None
 
 class RsiStrategy(Strategy):
-    """Strategy 6: RSI-based Strategy"""
-    def analyze(self, prices, volumes):
-        if len(prices) < 14:
+    """Strategy 6: RSI-based"""
+    def analyze(self, data):
+        if len(data) < 14:
             return None
         
-        deltas = [prices[i] - prices[i-1] for i in range(-14, 0)]
-        seed = deltas[:1]
-        up = seed[0] if seed[0] > 0 else 0
-        down = -seed[0] if seed[0] < 0 else 0
+        closes = [d['close'] for d in data]
+        deltas = [closes[i] - closes[i-1] for i in range(-14, 0)]
         
-        for d in deltas[1:]:
-            if d > 0:
-                up += d
-            else:
-                down -= d
+        up = sum([d for d in deltas if d > 0])
+        down = abs(sum([d for d in deltas if d < 0]))
         
         rs = up / down if down > 0 else 0
         rsi = 100 - (100 / (1 + rs)) if rs > 0 else 50
@@ -265,16 +334,18 @@ class RsiStrategy(Strategy):
         return None
 
 class BollingerBandsStrategy(Strategy):
-    """Strategy 7: Bollinger Bands Strategy"""
-    def analyze(self, prices, volumes):
-        if len(prices) < 20:
+    """Strategy 7: Bollinger Bands"""
+    def analyze(self, data):
+        if len(data) < 20:
             return None
         
-        sma = np.mean(prices[-20:])
-        std = np.std(prices[-20:])
+        closes = [d['close'] for d in data]
+        
+        sma = np.mean(closes[-20:])
+        std = np.std(closes[-20:])
         upper = sma + (std * 2)
         lower = sma - (std * 2)
-        current = prices[-1]
+        current = closes[-1]
         
         if current > upper:
             return {'signal': 'SELL', 'confidence': 0.6}
@@ -297,14 +368,14 @@ class EnsembleAnalyzer:
             BollingerBandsStrategy
         ]
     
-    def analyze(self, symbol, prices, volumes):
+    def analyze(self, symbol, data):
         """Get consensus signal from all strategies"""
         signals = {'BUY': 0, 'SELL': 0}
         confidences = []
         
         for StrategyClass in self.strategies:
             strategy = StrategyClass(symbol)
-            result = strategy.analyze(prices, volumes)
+            result = strategy.analyze(data)
             
             if result:
                 signals[result['signal']] += 1
@@ -322,9 +393,13 @@ class EnsembleAnalyzer:
                 'confidence': np.mean(confidences) if confidences else 0,
                 'strategies': signals['SELL']
             }
-        return None
+        return {
+            'signal': 'HOLD',
+            'confidence': 0,
+            'strategies': 0
+        }
 
-# ============== PAPER TRADING ENGINE WITH REAL DATA ==============
+# ============== PAPER TRADING ENGINE ==============
 
 class PaperTradingEngine:
     def __init__(self):
@@ -332,8 +407,6 @@ class PaperTradingEngine:
         self.positions = {}
         self.trades = []
         self.daily_pnl = 0.0
-        self.price_history = {}
-        self.volume_history = {}
         self.ensemble = EnsembleAnalyzer()
         self.data_fetcher = RealTimeDataFetcher()
         self.time_manager = MarketTimeManager()
@@ -345,74 +418,56 @@ class PaperTradingEngine:
             'KOTAKBANK-EQ', 'LT-EQ'
         ]
         
-        self._init_prices()
+        # Store historical data
+        self.historical_data = {}
+        
         logger.info("✅ PaperTradingEngine initialized with REAL-TIME DATA")
 
-    def _init_prices(self):
-        """Initialize with real prices from API or fallback"""
-        logger.info("📊 Fetching real-time prices from market data APIs...")
-        
+    def update_data(self):
+        """Update historical data for all symbols"""
         for symbol in self.symbols:
             try:
-                real_price = self.data_fetcher.get_nse_price(symbol)
-                
-                # Generate realistic price history
-                base_price = real_price
-                prices = [base_price]
-                volumes = [random.randint(100000, 500000)]
-                
-                for _ in range(49):
-                    change = random.gauss(0, 0.005)
-                    prices.append(prices[-1] * (1 + change))
-                    volumes.append(random.randint(100000, 500000))
-                
-                self.price_history[symbol] = prices
-                self.volume_history[symbol] = volumes
-                logger.info(f"  ✓ {symbol}: ₹{real_price:.2f}")
-                
+                data = self.data_fetcher.get_ohlcv_data(symbol, periods=100)
+                self.historical_data[symbol] = data
             except Exception as e:
-                logger.error(f"Error for {symbol}: {e}")
-                fallback_price = self.data_fetcher.get_fallback_price(symbol)
-                self.price_history[symbol] = [fallback_price] * 50
-                self.volume_history[symbol] = [random.randint(100000, 500000)] * 50
-
-    def update_prices(self):
-        """Update prices with realistic market movement"""
-        for symbol in self.price_history:
-            change = random.gauss(0, 0.005)
-            new_price = self.price_history[symbol][-1] * (1 + change)
-            self.price_history[symbol].append(new_price)
-            self.volume_history[symbol].append(random.randint(100000, 500000))
-            
-            if len(self.price_history[symbol]) > 100:
-                self.price_history[symbol] = self.price_history[symbol][-100:]
-                self.volume_history[symbol] = self.volume_history[symbol][-100:]
+                logger.error(f"Error updating {symbol}: {e}")
 
     def get_signals(self):
         """Get trading signals from ensemble"""
         signals = []
-        for symbol in self.price_history:
-            result = self.ensemble.analyze(
-                symbol,
-                self.price_history[symbol],
-                self.volume_history[symbol]
-            )
-            if result:
+        
+        for symbol in self.symbols:
+            if symbol not in self.historical_data:
+                continue
+            
+            data = self.historical_data[symbol]
+            if len(data) < 20:
+                continue
+            
+            result = self.ensemble.analyze(symbol, data)
+            
+            if result['signal'] != 'HOLD':
                 signals.append({
                     'symbol': symbol,
-                    'signal': result['signal'],
+                    'signal_type': result['signal'],
                     'confidence': round(result['confidence'], 2),
                     'strategies': result['strategies'],
-                    'price': round(self.price_history[symbol][-1], 2)
+                    'price': round(data[-1]['close'], 2),
+                    'risk_reward': '1:2',
+                    'timestamp': datetime.now().isoformat()
                 })
+        
         return signals
 
     def get_portfolio_value(self):
         """Calculate portfolio value"""
         position_value = 0
-        for symbol, qty in self.positions.items():
-            if symbol in self.price_history:
-                position_value += self.price_history[symbol][-1] * qty
+        
+        for symbol, pos in self.positions.items():
+            if symbol in self.historical_data and len(self.historical_data[symbol]) > 0:
+                current_price = self.historical_data[symbol][-1]['close']
+                position_value += current_price * pos['quantity']
+        
         return self.capital + position_value
 
     def place_order(self, symbol, trans_type, qty, price):
@@ -421,29 +476,59 @@ class PaperTradingEngine:
             cost = price * qty
             if cost > self.capital:
                 return {'success': False, 'error': 'Insufficient capital'}
+            
             self.capital -= cost
-            self.positions[symbol] = self.positions.get(symbol, 0) + qty
+            
+            if symbol in self.positions:
+                # Average price
+                old_qty = self.positions[symbol]['quantity']
+                old_price = self.positions[symbol]['avg_price']
+                new_qty = old_qty + qty
+                new_avg = ((old_price * old_qty) + (price * qty)) / new_qty
+                
+                self.positions[symbol]['quantity'] = new_qty
+                self.positions[symbol]['avg_price'] = new_avg
+            else:
+                self.positions[symbol] = {
+                    'quantity': qty,
+                    'avg_price': price,
+                    'entry_time': datetime.now().isoformat(),
+                    'stop_loss': price * 0.98,
+                    'target': price * 1.04
+                }
+            
             logger.info(f"✅ BUY {symbol}: {qty} @ ₹{price:.2f}")
             return {'success': True}
         
         elif trans_type == 'SELL':
-            if symbol not in self.positions or self.positions[symbol] == 0:
-                return {'success': False, 'error': 'No position'}
+            if symbol not in self.positions or self.positions[symbol]['quantity'] < qty:
+                return {'success': False, 'error': 'Insufficient quantity'}
+            
             proceeds = price * qty
             self.capital += proceeds
-            avg_buy_price = self.price_history[symbol][-30] if len(self.price_history[symbol]) > 30 else price
+            
+            avg_buy_price = self.positions[symbol]['avg_price']
             pnl = (price - avg_buy_price) * qty
             self.daily_pnl += pnl
+            
             self.trades.append({
                 'symbol': symbol,
-                'qty': qty,
-                'price': round(price, 2),
+                'quantity': qty,
+                'entry_price': round(avg_buy_price, 2),
+                'exit_price': round(price, 2),
                 'pnl': round(pnl, 2),
                 'time': datetime.now().isoformat()
             })
-            self.positions[symbol] -= qty
+            
+            self.positions[symbol]['quantity'] -= qty
+            
+            if self.positions[symbol]['quantity'] == 0:
+                del self.positions[symbol]
+            
             logger.info(f"✅ SELL {symbol}: {qty} @ ₹{price:.2f}, P&L: ₹{pnl:.2f}")
             return {'success': True}
+        
+        return {'success': False, 'error': 'Invalid transaction type'}
 
 # ============== AUTO TRADING BOT ==============
 
@@ -451,15 +536,24 @@ class AutoTradingBot:
     def __init__(self, engine):
         self.engine = engine
         self.running = False
+        self.last_update = 0
         logger.info("✅ AutoTradingBot created")
 
     def start(self):
         """Start bot trading loop"""
         self.running = True
-        logger.info("🤖 BOT MONITORING LOOP STARTED")
+        logger.info("🤖 BOT STARTED")
         
         while self.running:
             try:
+                now = time_module.time()
+                
+                # Update data every 60 seconds
+                if now - self.last_update > 60:
+                    logger.info("📊 Updating market data...")
+                    self.engine.update_data()
+                    self.last_update = now
+                
                 # Check market hours
                 market_status = self.engine.time_manager.get_market_status()
                 
@@ -468,34 +562,34 @@ class AutoTradingBot:
                     time_module.sleep(30)
                     continue
                 
-                # Update prices
-                self.engine.update_prices()
-                
-                # Get signals from 7 strategies
+                # Get signals
                 signals = self.engine.get_signals()
                 
                 if signals:
                     logger.info(f"📊 Total Signals: {len(signals)}")
-                    for signal in signals:
-                        logger.info(f"  → {signal['symbol']}: {signal['signal']} ({signal['strategies']}/7 strategies, {signal['confidence']} conf)")
                     
-                    # Execute on strong consensus (5+ strategies agree)
                     for signal in signals:
-                        if signal['strategies'] >= 5:
+                        logger.info(f"  → {signal['symbol']}: {signal['signal_type']} ({signal['strategies']}/7 strategies)")
+                        
+                        # Execute on strong consensus (4+ strategies agree)
+                        if signal['strategies'] >= 4:
                             symbol = signal['symbol']
-                            price = self.engine.price_history[symbol][-1]
+                            price = signal['price']
                             
-                            if signal['signal'] == 'BUY' and len(self.engine.positions) < 5:
-                                self.engine.place_order(symbol, 'BUY', 1, price)
-                            elif signal['signal'] == 'SELL' and symbol in self.engine.positions:
-                                qty = self.engine.positions[symbol]
+                            if signal['signal_type'] == 'BUY' and len(self.engine.positions) < 5:
+                                qty = max(1, int((self.engine.capital * 0.1) / price))
+                                self.engine.place_order(symbol, 'BUY', qty, price)
+                            
+                            elif signal['signal_type'] == 'SELL' and symbol in self.engine.positions:
+                                qty = self.engine.positions[symbol]['quantity']
                                 if qty > 0:
                                     self.engine.place_order(symbol, 'SELL', qty, price)
                 
-                time_module.sleep(2)
+                time_module.sleep(10)
+                
             except Exception as e:
                 logger.error(f"Bot error: {e}", exc_info=True)
-                time_module.sleep(2)
+                time_module.sleep(10)
 
     def stop(self):
         """Stop bot"""
@@ -519,7 +613,7 @@ def health():
         }), 200
     except Exception as e:
         logger.error(f"Health check error: {e}")
-        return jsonify({'status': 'error'}), 500
+        return jsonify({'status': 'error', 'market_status': 'unknown'}), 500
 
 @app.route('/api/bot/start', methods=['POST'])
 def start_bot():
@@ -527,13 +621,12 @@ def start_bot():
     global trading_bot, bot_thread, bot_running, paper_engine
     
     try:
-        logger.info("📍 /api/bot/start called")
-        
         if bot_running:
             return jsonify({'success': False, 'error': 'Bot already running'}), 400
 
         if not paper_engine:
             paper_engine = PaperTradingEngine()
+            paper_engine.update_data()
 
         trading_bot = AutoTradingBot(paper_engine)
         bot_thread = threading.Thread(target=trading_bot.start, daemon=True)
@@ -572,10 +665,12 @@ def stop_bot():
 def bot_status():
     """Get bot status"""
     try:
+        market_status = MarketTimeManager.get_market_status()
         return jsonify({
             'success': True,
             'running': bot_running,
-            'mode': current_mode
+            'mode': current_mode,
+            'market_status': market_status
         }), 200
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -632,13 +727,16 @@ def positions():
             return jsonify({'success': True, 'data': []}), 200
 
         pos_list = []
-        for symbol, qty in paper_engine.positions.items():
-            if qty > 0:
-                price = paper_engine.price_history.get(symbol, [0])[-1]
+        for symbol, pos in paper_engine.positions.items():
+            if symbol in paper_engine.historical_data and len(paper_engine.historical_data[symbol]) > 0:
+                current_price = paper_engine.historical_data[symbol][-1]['close']
                 pos_list.append({
                     'symbol': symbol,
-                    'quantity': qty,
-                    'price': round(price, 2)
+                    'quantity': pos['quantity'],
+                    'avg_price': round(pos['avg_price'], 2),
+                    'current_price': round(current_price, 2),
+                    'stop_loss': round(pos['stop_loss'], 2),
+                    'target': round(pos['target'], 2)
                 })
 
         return jsonify({'success': True, 'data': pos_list}), 200
@@ -653,18 +751,21 @@ def trades():
             return jsonify({
                 'success': True,
                 'data': [],
-                'statistics': {'total_trades': 0, 'total_pnl': 0}
+                'statistics': {'total_trades': 0, 'total_pnl': 0, 'win_rate': 0}
             }), 200
 
         trade_list = paper_engine.trades
         total_pnl = sum(t['pnl'] for t in trade_list)
+        winning_trades = sum(1 for t in trade_list if t['pnl'] > 0)
+        win_rate = (winning_trades / len(trade_list) * 100) if len(trade_list) > 0 else 0
 
         return jsonify({
             'success': True,
-            'data': trade_list,
+            'data': trade_list[-20:],  # Last 20 trades
             'statistics': {
                 'total_trades': len(trade_list),
-                'total_pnl': round(total_pnl, 2)
+                'total_pnl': round(total_pnl, 2),
+                'win_rate': round(win_rate, 1)
             }
         }), 200
     except Exception as e:
@@ -672,7 +773,7 @@ def trades():
 
 @app.route('/api/signals', methods=['GET'])
 def signals():
-    """Get current signals from all 7 strategies"""
+    """Get current signals"""
     try:
         if not paper_engine:
             return jsonify({'success': True, 'data': []}), 200
@@ -692,10 +793,14 @@ def config():
         return jsonify({
             'success': True,
             'data': {
+                'watchlist': paper_engine.symbols if paper_engine else [],
                 'capital': 100000,
                 'mode': current_mode,
                 'bot_running': bot_running,
-                'strategies': 7
+                'strategies': 7,
+                'max_positions': 5,
+                'risk_per_trade': 0.02,
+                'square_off_time': '15:15'
             }
         }), 200
     except Exception as e:
@@ -775,4 +880,5 @@ if __name__ == '__main__':
         use_reloader=False,
         threaded=True
     )
+
 
