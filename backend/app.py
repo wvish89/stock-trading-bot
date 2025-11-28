@@ -19,7 +19,7 @@ import asyncio
 import threading
 
 # Import enhanced trading bot
-from enhanced_trading_bot import TradingBotManager
+from trading_bot import TradingBotManager
 from realtime_data_manager import AccurateMarketTimeManager
 
 # Setup logging
@@ -610,3 +610,4 @@ if __name__ == '__main__':
         use_reloader=False,
         threaded=True
     )
+
