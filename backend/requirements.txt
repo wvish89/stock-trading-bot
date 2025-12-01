@@ -11,9 +11,16 @@ numpy>=1.24.0
 # HTTP Requests
 requests==2.31.0
 
+# Yahoo Finance for real-time data
+yfinance==0.2.32
+
 # Date/Time handling
 python-dateutil==2.8.2
 pytz==2023.3
+tzdata==2023.3
+
+# Deployment
+eventlet==0.33.3
 
 # WebSocket Support (for real-time data)
 websockets==12.0
@@ -52,4 +59,5 @@ eventlet==0.33.3
 
 # Time zone support
 tzdata==2023.3
+
 
